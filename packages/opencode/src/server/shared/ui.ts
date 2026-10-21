@@ -1,6 +1,13 @@
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Stream } from "effect"
-import { HttpBody, HttpClient, HttpClientRequest, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+import {
+  FetchHttpClient,
+  HttpBody,
+  HttpClient,
+  HttpClientRequest,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http"
 import { createHash } from "node:crypto"
 import { ProxyUtil } from "../proxy-util"
 
@@ -38,7 +45,10 @@ function proxyResponseHeaders(headers: Record<string, string>) {
 }
 
 export function upstreamURL(path: string) {
-  return new URL(path, UI_UPSTREAM).toString()
+  const url = new URL(UI_UPSTREAM)
+  // A pathname assignment cannot reinterpret leading slashes as a new authority.
+  url.pathname = path
+  return url.toString()
 }
 
 export function embeddedUI(disableEmbeddedWebUi: boolean) {
@@ -85,12 +95,17 @@ export function serveUIEffect(
 
     if (embeddedWebUI) return yield* serveEmbeddedUIEffect(path, services.fs, embeddedWebUI)
 
-    const response = yield* services.client.execute(
-      HttpClientRequest.make(request.method)(upstreamURL(path), {
-        headers: ProxyUtil.headers(request.headers, { host: UI_UPSTREAM.host }),
-        body: requestBody(request),
-      }),
-    )
+    const requestHeaders = ProxyUtil.headers(request.headers, { host: UI_UPSTREAM.host })
+    requestHeaders.delete("authorization")
+    requestHeaders.delete("cookie")
+    const response = yield* services.client
+      .execute(
+        HttpClientRequest.make(request.method)(upstreamURL(path), {
+          headers: requestHeaders,
+          body: requestBody(request),
+        }),
+      )
+      .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }))
     const headers = proxyResponseHeaders(response.headers)
 
     if (response.headers["content-type"]?.includes("text/html")) {

@@ -1,9 +1,12 @@
+import { NodeHttpServer } from "@effect/platform-node"
+import Http from "node:http"
 import { createHash } from "node:crypto"
 import { describe, expect } from "bun:test"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { ConfigProvider, Effect, Layer, Option } from "effect"
+import { ConfigProvider, Context, Effect, Layer, Option } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import {
+  FetchHttpClient,
   HttpClient,
   HttpClientRequest,
   HttpClientResponse,
@@ -17,7 +20,7 @@ import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ServerAuth } from "../../src/server/auth"
 import { authorizationRouterMiddleware } from "../../src/server/routes/instance/httpapi/middleware/authorization"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
-import { serveEmbeddedUIEffect, serveUIEffect } from "../../src/server/shared/ui"
+import { serveEmbeddedUIEffect, serveUIEffect, upstreamURL } from "../../src/server/shared/ui"
 import { testEffect } from "../lib/effect"
 
 const testStateLayer = Layer.effectDiscard(
@@ -184,6 +187,91 @@ function responseText(response: Response) {
 }
 
 describe("HttpApi UI fallback", () => {
+  it.effect("keeps authority-like paths on the trusted UI origin", () =>
+    Effect.sync(() => {
+      ;[
+        "//127.0.0.1/admin",
+        "//169.254.169.254/latest/meta-data/",
+        "//[::1]/admin",
+        "https://example.invalid/asset.js",
+        "\\\\example.invalid/asset.js",
+        "/%2f%2fexample.invalid/asset.js",
+      ].forEach((path) => {
+        expect(new URL(upstreamURL(path)).origin).toBe("https://app.opencode.ai")
+      })
+      expect(upstreamURL("/assets/app.js")).toBe("https://app.opencode.ai/assets/app.js")
+    }),
+  )
+
+  it.live("does not forward local authentication credentials to the UI upstream", () =>
+    Effect.gen(function* () {
+      let headers: Record<string, string> | undefined
+      const fs = yield* FSUtil.Service
+      yield* serveUIEffect(
+        HttpServerRequest.fromWeb(
+          new Request("http://localhost/assets/app.js", {
+            headers: { authorization: "Basic fixture", cookie: "session=fixture", accept: "text/javascript" },
+          }),
+        ),
+        {
+          fs,
+          disableEmbeddedWebUi: true,
+          client: HttpClient.make((request) => {
+            headers = request.headers
+            return Effect.succeed(HttpClientResponse.fromWeb(request, new Response("asset")))
+          }),
+        },
+      )
+      expect(headers?.authorization).toBeUndefined()
+      expect(headers?.cookie).toBeUndefined()
+      expect(headers?.accept).toBe("text/javascript")
+      expect(headers?.host).toBe("app.opencode.ai")
+    }),
+  )
+
+  it.live("does not follow UI upstream redirects to another origin", () =>
+    Effect.gen(function* () {
+      const listen = (response: Effect.Effect<HttpServerResponse.HttpServerResponse>) =>
+        Effect.gen(function* () {
+          const context = yield* Layer.build(NodeHttpServer.layer(Http.createServer, { host: "127.0.0.1", port: 0 }))
+          const server = Context.get(context, HttpServer.HttpServer)
+          yield* server.serve(response)
+          return HttpServer.formatAddress(server.address)
+        })
+      let received = 0
+      const target = yield* listen(
+        Effect.sync(() => {
+          received++
+          return HttpServerResponse.text("private fixture")
+        }),
+      )
+      const upstream = yield* listen(
+        Effect.succeed(HttpServerResponse.empty({ status: 302, headers: { location: target } })),
+      )
+      const fs = yield* FSUtil.Service
+      const response = yield* Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient
+        return yield* serveUIEffect(HttpServerRequest.fromWeb(new Request("http://localhost/")), {
+          fs,
+          client,
+          disableEmbeddedWebUi: true,
+        })
+      }).pipe(
+        Effect.provide(FetchHttpClient.layer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          Object.assign((input: RequestInfo | URL, init?: RequestInit) => {
+            const url = new URL(input instanceof Request ? input.url : input.toString())
+            // Route only the fixed UI origin to a local fixture; redirects use real fetch behavior.
+            return fetch(url.origin === "https://app.opencode.ai" ? new URL(url.pathname, upstream) : input, init)
+          }, fetch),
+        ),
+      )
+      expect(response.status).toBe(302)
+      expect(received).toBe(0)
+    }),
+  )
+
   it.live("serves the web UI through the HTTP API app", () =>
     Effect.gen(function* () {
       let proxiedUrl: string | undefined
