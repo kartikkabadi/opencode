@@ -31,7 +31,7 @@ https://github.com/anomalyco/models.dev
 
 ## Developing OpenCode
 
-- Requirements: Bun 1.3+
+- Requirements: Bun 1.4.4+
 - Install dependencies and start the dev server from the repo root:
 
   ```bash

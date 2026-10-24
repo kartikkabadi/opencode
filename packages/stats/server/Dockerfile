@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14-alpine AS base
+FROM oven/bun:1.4.4-alpine AS base
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ FROM base AS installer
 
 COPY --from=pruner /app/out/json/ ./
 
-# Bun 1.3.x needs the pruned workspace globs and lockfile metadata refreshed before the frozen production install.
+# Refresh the pruned workspace globs and lockfile metadata before the frozen production install.
 RUN bun -e 'const packageJson = await Bun.file("package.json").json(); packageJson.workspaces.packages = Array.from(new Bun.Glob("packages/**/package.json").scanSync(".")).map((file) => file.slice(0, -"/package.json".length)).sort(); await Bun.write("package.json", JSON.stringify(packageJson, null, 2) + "\n")'
 RUN rm -f bun.lock && bun install --filter @opencode-ai/stats-server --lockfile-only --ignore-scripts
 RUN bun install --filter @opencode-ai/stats-server --frozen-lockfile --production --ignore-scripts
